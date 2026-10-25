@@ -179,10 +179,36 @@ def test_login_sweeps_expired_sessions():
 
 
 def test_oversized_body_is_refused_through_wsgi():
-    c = Client()
-    status, _, _ = c.call("POST", "/api/auth/signup", {"email": "big@example.com", "password": "x" * 2_000_000,
-                                                       "invite_code": "let-me-in"})
-    assert status == 413
+    # The server may answer 413 and close the connection before the client has finished sending the 2 MB body.
+    # The client then sees a broken or reset connection instead of the response (this depends on timing and the
+    # OS), so that counts as a pass too, but only if the server is seen to have answered 413.
+    sent = []
+    app = _server.get_app()
+
+    def recording(environ, start_response):
+        def start(status, headers, exc_info=None):
+            if environ.get("PATH_INFO") == "/api/auth/signup":
+                sent.append(status)
+            return start_response(status, headers, exc_info)
+        return app(environ, start)
+
+    _server.set_app(recording)
+    try:
+        c = Client()
+        try:
+            status, _, _ = c.call("POST", "/api/auth/signup", {"email": "big@example.com", "password": "x" * 2_000_000,
+                                                               "invite_code": "let-me-in"})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            status = None
+            for _ in range(100):                     # the server thread may still be finishing the response
+                if sent:
+                    break
+                threading.Event().wait(0.05)
+            assert sent and sent[0].startswith("413"), f"{type(e).__name__} without a 413 from the server: {sent}"
+    finally:
+        _server.set_app(app)
+    assert status in (413, None), status
+    assert not sent or sent[0].startswith("413"), sent
 
 
 class Skip(Exception):
