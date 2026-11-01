@@ -70,7 +70,7 @@ def seeded(name: str) -> Calls:
 
 def test_employee_endpoints():
     s = seeded("employees")
-    assert s.get("/hr/schema") == {"module": "hr", "version": 3}
+    assert s.get("/hr/schema") == {"module": "hr", "version": 4}
     sam = s.get("/hr/employees/2")
     assert sam["manager_name"] == "Maya" and sam["employment_type"] == "part_time" and sam["status"] == "active"
     assert [e["employee_number"] for e in s.get("/hr/employees")] == ["E001", "E002"]
@@ -170,7 +170,7 @@ def _routes_of_main(enabled: str) -> dict:
 def test_main_mounts_the_router_only_when_enabled():
     on = _routes_of_main("1")
     assert "/hr/employees" in on["paths"] and "/hr/leave/requests/{request_id}/approve" in on["paths"]
-    assert on["schema"] == {"module": "hr", "version": 3}
+    assert on["schema"] == {"module": "hr", "version": 4}
     assert _routes_of_main("0") == {"paths": []}
 
 

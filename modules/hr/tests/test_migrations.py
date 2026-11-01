@@ -45,10 +45,11 @@ def test_a_new_database_gets_every_version_and_no_backup():
     out = h.init_db(conn)
     assert out == {"module": "hr", "from_version": 0, "to_version": LATEST, "applied": list(range(1, LATEST + 1)),
                    "backup": None}
-    assert h.schema_version(conn) == LATEST == h.latest_version() == 3
+    assert h.schema_version(conn) == LATEST == h.latest_version() == 4
     assert {"hr_employees", "hr_employment_events", "hr_leave_ledger", "hr_leave_requests"} <= tables(conn)
     names = [tuple(r) for r in conn.execute("SELECT module, version, name FROM module_migrations ORDER BY version")]
-    assert names == [("hr", 1, "employees"), ("hr", 2, "leave"), ("hr", 3, "rehire_and_half_days")]
+    assert names == [("hr", 1, "employees"), ("hr", 2, "leave"), ("hr", 3, "rehire_and_half_days"),
+                     ("hr", 4, "calendar_day_guards")]
     assert not [f for f in os.listdir(TMP.name) if f.startswith("new.db.") and f.endswith(".bak")]
 
 
@@ -66,7 +67,7 @@ def test_an_upgrade_backs_up_the_database_first_and_keeps_the_data():
     h.add_employee(conn, "hire", employee_number="E001", first_name="Maya", job_title="Owner", start_date="2025-01-06")
     backups = Path(TMP.name) / "upgrade_backups"
     out = h.init_db(conn, backup_dir=str(backups))
-    assert out["from_version"] == 1 and out["applied"] == [2, 3] and out["to_version"] == 3
+    assert out["from_version"] == 1 and out["applied"] == [2, 3, 4] and out["to_version"] == 4
     assert out["backup"] and Path(out["backup"]).parent == backups and "hr-v0001" in out["backup"]
     copy = sqlite3.connect(out["backup"])
     assert copy.execute("SELECT first_name FROM hr_employees").fetchall() == [("Maya",)]
@@ -212,7 +213,7 @@ def test_upgrading_to_3_rebuilds_the_event_table_and_keeps_every_row_and_rule():
     r = {"request_id": 1}
     before = [tuple(row) for row in conn.execute("SELECT * FROM hr_employment_events ORDER BY id")]
     out = h.init_db(conn)
-    assert out["applied"] == [3] and out["backup"]
+    assert out["applied"] == [3, 4] and out["backup"]
     assert [tuple(row) for row in conn.execute("SELECT * FROM hr_employment_events ORDER BY id")] == before
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
@@ -225,6 +226,7 @@ def test_upgrading_to_3_rebuilds_the_event_table_and_keeps_every_row_and_rule():
     assert h.rehire_employee(conn, 2, "2026-01-05", "back")["status"] == "active"
 
 
+AFTER = {"2026-02-30": "2026-03-02", "2026-04-31": "2026-05-02", "2025-02-29": "2025-03-02"}
 IMPOSSIBLE_DATES = ("2026-02-30", "2026-04-31", "2025-02-29")
 REAL_DATES = ("2024-02-29", "2026-01-31", "2026-12-31", "2026-02-28", "2026-04-30")
 
@@ -268,6 +270,191 @@ def test_every_date_check_refuses_impossible_days_whatever_the_sqlite_version():
         assert conn.execute(f"SELECT {full}", {"d": None}).fetchone()[0] in (None, 1), (name, col)
         for d in ("2026-1-05", "2026-01-05 10:00", "05/01/2026", "", "2026-13-01"):
             assert conn.execute(f"SELECT {full}", {"d": d}).fetchone()[0] == 0, (name, col, d)
+
+
+# ---- 0004: a database that an earlier release already migrated to version 3 (CHECKs without the day guard)
+
+_GUARD = None
+
+
+def legacy_v3(name: str):
+    """A database at version 3 as the release before the day guard left it: the 0001-0003 files with the
+    day-of-month guard taken out of every date CHECK."""
+    import re
+    folder = Path(TMP.name) / f"{name}_legacy_migrations"
+    folder.mkdir()
+    for path in sorted(Path(h.MIGRATIONS).glob("000[123]_*.sql")):
+        text = re.sub(r" AND substr\((\w+), 9, 2\) <= substr\(date\(substr\(\1, 1, 8\) \|\| '01', '\+1 month', '-1 day'\), 9, 2\)",
+                      "", path.read_text())
+        assert not [l for l in text.splitlines() if "'-1 day'" in l and not l.lstrip().startswith("--")], path.name
+        (folder / path.name).write_text(text)
+    path = os.path.join(TMP.name, name + ".db")
+    conn = h.connect(path)
+    assert m.migrate(conn, "hr", folder)["to_version"] == 3
+    return conn, path
+
+
+def raw_hire(conn, number, start_date, key, effective="2025-03-03", employee_id=None):
+    """Writes a hire event straight to SQL, the way a script or another tool could, around the Python date check."""
+    from test_employees import raw_event
+    snap = {k: None for k in h._SNAPSHOT_FIELDS}
+    snap.update(employee_number=number, first_name="Raw", job_title="Clerk", start_date=start_date, status="active",
+                employment_type=snap.get("employment_type") or "full_time")
+    eid = employee_id or conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM hr_employees").fetchone()[0]
+    return raw_event(conn, eid, 1, "hired", snap, key, effective)
+
+
+def seed_legacy(conn):
+    h.add_employee(conn, "h1", employee_number="E001", first_name="Maya", job_title="Owner", start_date="2025-01-06")
+    h.add_employee(conn, "h2", employee_number="E002", first_name="Sam", job_title="Clerk", start_date="2025-02-03",
+                   manager_id=1)
+    h.create_leave_type(conn, "annual", "Annual leave", "lt", annual_allowance_days=20)
+    h.accrue_annual_leave(conn, 1, "annual", 2025, "acc")
+
+
+def test_the_legacy_v3_fixture_really_accepts_an_impossible_day_on_this_sqlite():
+    conn, _ = legacy_v3("legacy_proof")
+    seed_legacy(conn)
+    sqlite_has_strict_date = sqlite3.sqlite_version_info >= (3, 45)
+    try:
+        raw_hire(conn, "E003", "2026-02-30", "h3")
+        accepted = True
+    except sqlite3.IntegrityError:
+        accepted = False
+    assert accepted == (not sqlite_has_strict_date), (sqlite3.sqlite_version, accepted)
+
+
+def test_upgrading_a_v3_database_to_4_adds_six_triggers_and_keeps_every_row():
+    conn, _ = legacy_v3("to_v4_rows")
+    seed_legacy(conn)
+    h.update_employee(conn, 2, {"job_title": "Lead"}, "2025-06-02", "u2")
+    before = {t: [tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY 1")]
+              for t in ("hr_employees", "hr_employment_events", "hr_leave_ledger", "hr_leave_types")}
+    triggers = lambda: {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%_real_day'")}
+    assert triggers() == set()
+    out = h.init_db(conn)
+    assert out["from_version"] == 3 and out["applied"] == [4] and out["to_version"] == 4 and out["backup"]
+    assert len(triggers()) == 6
+    after = {t: [tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY 1")] for t in before}
+    assert after == before
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    h.verify_schema(conn)
+
+
+def rejected_day(fn, *columns, old_message="is not a real calendar day"):
+    """The write must be refused because of one of these date columns, whichever rule fires first.
+
+    SQLite before 3.45 lets `x IS date(x)` accept impossible days, so the refusal comes from the 0004 trigger and
+    carries its message. From 3.45 the old CHECK already refuses them and raises its own message, naming the column.
+    Either way a write that goes through, or one refused for another column, fails the test."""
+    if sqlite3.sqlite_version_info < (3, 45):
+        return rejected(fn, old_message)
+    try:
+        fn()
+    except sqlite3.IntegrityError as e:
+        assert any(f"CHECK constraint failed: {c} IS date({c})" in str(e) for c in columns), \
+            f"refused for the wrong reason: {e!r}, wanted a date CHECK on one of {columns}"
+    else:
+        raise AssertionError(f"an impossible day was accepted (columns {columns})")
+
+
+def test_after_the_upgrade_an_employee_cannot_start_or_end_on_an_impossible_day():
+    conn, _ = legacy_v3("v4_employee")
+    seed_legacy(conn)
+    h.init_db(conn)
+    for i, day in enumerate(IMPOSSIBLE_DATES):
+        rejected_day(lambda: raw_hire(conn, f"X{i}", day, f"x{i}"), "start_date", "effective_date")
+    assert conn.execute("SELECT COUNT(*) FROM hr_employees").fetchone()[0] == 2
+    from test_employees import raw_event, snapshot_of
+    for i, day in enumerate(IMPOSSIBLE_DATES):
+        gone = snapshot_of(conn, 2) | {"status": "terminated", "end_date": day, "termination_reason": "left"}
+        rejected_day(lambda: raw_event(conn, 2, 2, "terminated", gone, f"t{i}", day), "end_date", "effective_date")
+    assert h.employee(conn, 2)["status"] == "active"
+
+
+def test_after_the_upgrade_an_employment_event_refuses_an_impossible_day():
+    conn, _ = legacy_v3("v4_event")
+    seed_legacy(conn)
+    h.init_db(conn)
+    from test_employees import raw_event, snapshot_of
+    for i, day in enumerate(IMPOSSIBLE_DATES):
+        rejected_day(lambda: raw_event(conn, 2, 2, "updated", snapshot_of(conn, 2) | {"job_title": "Lead"}, f"u{i}", day),
+                     "effective_date")
+    assert h.employee(conn, 2)["job_title"] == "Clerk" and len(h.employment_history(conn, 2)) == 1
+
+
+def test_after_the_upgrade_a_leave_request_refuses_an_impossible_start_or_end():
+    conn, _ = legacy_v3("v4_leave")
+    seed_legacy(conn)
+    h.init_db(conn)
+    from test_leave import raw_request
+    for i, day in enumerate(IMPOSSIBLE_DATES):
+        rejected_day(lambda: raw_request(conn, 1, 1, day, AFTER[day], 2, f"s{i}"), "start_date",
+                     old_message="start_date is not a real calendar day")
+        rejected_day(lambda: raw_request(conn, 1, 1, "2025-02-26", day, 8, f"e{i}"), "end_date",
+                     old_message="end_date is not a real calendar day")
+    assert conn.execute("SELECT COUNT(*) FROM hr_leave_requests").fetchone()[0] == 0
+
+
+def test_after_the_upgrade_a_ledger_as_of_date_refuses_an_impossible_day():
+    conn, _ = legacy_v3("v4_ledger")
+    seed_legacy(conn)
+    h.init_db(conn)
+    before = conn.execute("SELECT COUNT(*) FROM hr_leave_ledger").fetchone()[0]
+    for i, day in enumerate(IMPOSSIBLE_DATES):
+        rejected_day(lambda: conn.execute("""INSERT INTO hr_leave_ledger (employee_id, leave_type_id, entry_type, half_days,
+                                         reason, as_of, idempotency_key) VALUES (1, 1, 'adjustment', 1, 'x', ?, ?)""", (day, f"l{i}")),
+                     "as_of")
+    assert conn.execute("SELECT COUNT(*) FROM hr_leave_ledger").fetchone()[0] == before
+
+
+def test_after_the_upgrade_real_month_ends_are_still_accepted():
+    conn, _ = legacy_v3("v4_real")
+    seed_legacy(conn)
+    h.init_db(conn)
+    for i, day in enumerate(("2024-02-29", "2026-01-31", "2026-12-31", "2026-02-28", "2026-04-30")):
+        raw_hire(conn, f"R{i}", day, f"r{i}", effective=day)
+    assert conn.execute("SELECT COUNT(*) FROM hr_employees").fetchone()[0] == 7
+
+
+def test_the_same_upgrade_is_a_no_op_the_second_time_and_a_new_database_has_the_guards_too():
+    conn, _ = legacy_v3("v4_again")
+    h.init_db(conn)
+    assert h.init_db(conn)["applied"] == []
+    fresh_conn, _ = fresh("v4_fresh")
+    h.init_db(fresh_conn)
+    names = {r[0] for r in fresh_conn.execute("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE '%_real_day'")}
+    assert len(names) == 6
+    h.verify_schema(fresh_conn)
+
+
+def test_a_failing_0004_rolls_back_and_leaves_the_database_at_version_3():
+    conn, _ = legacy_v3("v4_fail")
+    seed_legacy(conn)
+    folder = folder_copy("v4_broken")
+    (folder / "0004_calendar_day_guards.sql").write_text(
+        (folder / "0004_calendar_day_guards.sql").read_text() + "\nCREATE TRIGGER hr_employees_start_date_real_day BEFORE INSERT ON hr_employees BEGIN SELECT 1; END;\n")
+    try:
+        m.migrate(conn, "hr", folder)
+    except sqlite3.OperationalError:
+        pass
+    else:
+        raise AssertionError("expected the duplicate trigger to fail")
+    assert h.schema_version(conn) == 3
+    assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name LIKE '%_real_day'").fetchone()
+    assert h.init_db(conn)["to_version"] == 4
+
+
+def test_an_existing_impossible_day_in_a_v3_database_does_not_block_the_upgrade():
+    """The triggers guard new inserts only. A row an earlier release already stored is kept, not rewritten."""
+    if sqlite3.sqlite_version_info >= (3, 45):
+        return
+    conn, _ = legacy_v3("v4_existing")
+    seed_legacy(conn)
+    raw_hire(conn, "E099", "2026-02-30", "bad")
+    out = h.init_db(conn)
+    assert out["to_version"] == 4
+    assert conn.execute("SELECT start_date FROM hr_employees WHERE employee_number = 'E099'").fetchone()[0] == "2026-02-30"
 
 
 def test_an_in_memory_database_migrates_without_a_backup():

@@ -17,6 +17,7 @@ modules/hr/
   migrations/0001_employees.sql
   migrations/0002_leave.sql
   migrations/0003_rehire_and_half_days.sql
+  migrations/0004_calendar_day_guards.sql
   api.py                 FastAPI router, /hr/... (local dev only, see below)
   demo_toy_shop.py       walkthrough for a small toy shop
   tests/                 plain scripts, also collected by pytest
@@ -287,6 +288,10 @@ automatic backups":
   row and id, and recreates the triggers it replaces under the same names.
   Half-day requests made before it have no `half` and still block the whole
   day.
+- 0004 adds one AFTER INSERT trigger per date column (six) that refuses a day past the end of its month. It is
+  for databases already at version 3 from a release whose CHECKs lacked the day guard: an applied file never
+  runs again and SQLite cannot change a CHECK in place. On a new database the CHECK refuses first and the triggers
+  do not fire. Rows already stored are left as they are.
 
 `hr.init_db(conn, backup_dir=None)` is `migrate(conn, "hr", hr.MIGRATIONS)`.
 Whoever builds the per-business database opener should call each module's
@@ -308,7 +313,7 @@ python -B modules/hr/tests/mutation_check.py   # ~1 min, not run by CI
 |---|---|---|
 | `test_employees.py` | 17 | hiring, required/invalid fields, no sensitive fields, unique number/email, managers and loops, update diffs, termination and report reassignment, idempotent replay/conflict/failed key, 8 concurrent hires, raw SQL against every employee/event rule |
 | `test_leave.py` | 23 | leave types and allowance policy, accrual + proration, adjustments, working days and half days, approve/reject/cancel with credit-back, balance enforcement with pending holds, untracked types, overlaps across types, racing requests, termination effects, idempotency, ledger immutability, raw SQL against every leave rule, impossible days (2026-02-30) refused in every leave date column, deletes on a connection with foreign keys off, amounts/ids too big for SQLite, termination's derived keys never colliding |
-| `test_migrations.py` | 12 | fresh, rerun, stepwise upgrade with backup holding the old data, failing migration rolls back (keeping earlier versions of the same run), numbering rules, newer database refused, sharing a database with another module's tables, concurrent migrators taking one backup, upgrading a v2 database to 3 keeps every row and rule, every date CHECK refuses impossible days on any SQLite version, in-memory |
+| `test_migrations.py` | 22 | fresh, rerun, stepwise upgrade with backup holding the old data, failing migration rolls back (keeping earlier versions of the same run), numbering rules, newer database refused, sharing a database with another module's tables, concurrent migrators taking one backup, upgrading a v2 database to 3 keeps every row and rule, every date CHECK refuses impossible days on any SQLite version, in-memory; a database already at version 3 without the day guard gains six triggers on upgrade, keeps every row, refuses impossible days in every date column, a failing 0004 rolls back to 3 |
 | `test_hardening.py` | 19 | the cancel clock, termination with spanning leave (charged to the end date) and nothing written after it, rehire (same record, rules, old-employment leave), trimmed/normalised identity fields, length limits on every text input, event dates in order, huge or odd ids, am/pm halves, the startup schema check; raw SQL against each new rule |
 | `test_api.py` | 14 | every endpoint, no sensitive fields in request bodies, 409/422/404/503 mapping, Idempotency-Key required and replayed, `main.py` mounts `/hr` only when enabled, too-big numbers, strict JSON types (no `"2"`→2 or `true`→1 coercion), empty decision bodies, a vanished database is a 503 and recovers, a tampered schema is a 503, rehire and half endpoints, length limits on bodies, header, query and path |
 | `test_toy_shop_walkthrough.py` | 2 | the demo end to end, and replaying it writes nothing |
