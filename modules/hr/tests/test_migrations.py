@@ -341,17 +341,34 @@ def test_upgrading_a_v3_database_to_4_adds_six_triggers_and_keeps_every_row():
     h.verify_schema(conn)
 
 
+def rejected_day(fn, *columns, old_message="is not a real calendar day"):
+    """The write must be refused because of one of these date columns, whichever rule fires first.
+
+    SQLite before 3.45 lets `x IS date(x)` accept impossible days, so the refusal comes from the 0004 trigger and
+    carries its message. From 3.45 the old CHECK already refuses them and raises its own message, naming the column.
+    Either way a write that goes through, or one refused for another column, fails the test."""
+    if sqlite3.sqlite_version_info < (3, 45):
+        return rejected(fn, old_message)
+    try:
+        fn()
+    except sqlite3.IntegrityError as e:
+        assert any(f"CHECK constraint failed: {c} IS date({c})" in str(e) for c in columns), \
+            f"refused for the wrong reason: {e!r}, wanted a date CHECK on one of {columns}"
+    else:
+        raise AssertionError(f"an impossible day was accepted (columns {columns})")
+
+
 def test_after_the_upgrade_an_employee_cannot_start_or_end_on_an_impossible_day():
     conn, _ = legacy_v3("v4_employee")
     seed_legacy(conn)
     h.init_db(conn)
     for i, day in enumerate(IMPOSSIBLE_DATES):
-        rejected(lambda: raw_hire(conn, f"X{i}", day, f"x{i}"), "is not a real calendar day")
+        rejected_day(lambda: raw_hire(conn, f"X{i}", day, f"x{i}"), "start_date", "effective_date")
     assert conn.execute("SELECT COUNT(*) FROM hr_employees").fetchone()[0] == 2
     from test_employees import raw_event, snapshot_of
     for i, day in enumerate(IMPOSSIBLE_DATES):
         gone = snapshot_of(conn, 2) | {"status": "terminated", "end_date": day, "termination_reason": "left"}
-        rejected(lambda: raw_event(conn, 2, 2, "terminated", gone, f"t{i}", day), "is not a real calendar day")
+        rejected_day(lambda: raw_event(conn, 2, 2, "terminated", gone, f"t{i}", day), "end_date", "effective_date")
     assert h.employee(conn, 2)["status"] == "active"
 
 
@@ -361,8 +378,8 @@ def test_after_the_upgrade_an_employment_event_refuses_an_impossible_day():
     h.init_db(conn)
     from test_employees import raw_event, snapshot_of
     for i, day in enumerate(IMPOSSIBLE_DATES):
-        rejected(lambda: raw_event(conn, 2, 2, "updated", snapshot_of(conn, 2) | {"job_title": "Lead"}, f"u{i}", day),
-                 "is not a real calendar day")
+        rejected_day(lambda: raw_event(conn, 2, 2, "updated", snapshot_of(conn, 2) | {"job_title": "Lead"}, f"u{i}", day),
+                     "effective_date")
     assert h.employee(conn, 2)["job_title"] == "Clerk" and len(h.employment_history(conn, 2)) == 1
 
 
@@ -372,8 +389,10 @@ def test_after_the_upgrade_a_leave_request_refuses_an_impossible_start_or_end():
     h.init_db(conn)
     from test_leave import raw_request
     for i, day in enumerate(IMPOSSIBLE_DATES):
-        rejected(lambda: raw_request(conn, 1, 1, day, AFTER[day], 2, f"s{i}"), "start_date is not a real calendar day")
-        rejected(lambda: raw_request(conn, 1, 1, "2025-02-26", day, 8, f"e{i}"), "end_date is not a real calendar day")
+        rejected_day(lambda: raw_request(conn, 1, 1, day, AFTER[day], 2, f"s{i}"), "start_date",
+                     old_message="start_date is not a real calendar day")
+        rejected_day(lambda: raw_request(conn, 1, 1, "2025-02-26", day, 8, f"e{i}"), "end_date",
+                     old_message="end_date is not a real calendar day")
     assert conn.execute("SELECT COUNT(*) FROM hr_leave_requests").fetchone()[0] == 0
 
 
@@ -383,9 +402,9 @@ def test_after_the_upgrade_a_ledger_as_of_date_refuses_an_impossible_day():
     h.init_db(conn)
     before = conn.execute("SELECT COUNT(*) FROM hr_leave_ledger").fetchone()[0]
     for i, day in enumerate(IMPOSSIBLE_DATES):
-        rejected(lambda: conn.execute("""INSERT INTO hr_leave_ledger (employee_id, leave_type_id, entry_type, half_days,
+        rejected_day(lambda: conn.execute("""INSERT INTO hr_leave_ledger (employee_id, leave_type_id, entry_type, half_days,
                                          reason, as_of, idempotency_key) VALUES (1, 1, 'adjustment', 1, 'x', ?, ?)""", (day, f"l{i}")),
-                 "is not a real calendar day")
+                     "as_of")
     assert conn.execute("SELECT COUNT(*) FROM hr_leave_ledger").fetchone()[0] == before
 
 
