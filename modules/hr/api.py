@@ -298,6 +298,12 @@ def list_requests(employee_id: Optional[int] = None,
     return _call(hr.leave_requests, conn, employee_id=employee_id, status=status)
 
 
+@router.get("/leave/out")
+def who_is_out(start_date: str, end_date: str, include_pending: bool = False, conn=Depends(get_conn)):
+    """Leave requests touching start_date..end_date, approved only unless include_pending=true."""
+    return _call(hr.leave_out, conn, start_date, end_date, include_pending=include_pending)
+
+
 @router.post("/leave/requests", status_code=201)
 def request_leave(body: NewLeaveRequest, key: str = Depends(_key), conn=Depends(get_conn)):
     return _call(hr.request_leave, conn, body.employee_id, body.leave_type, body.start_date, body.end_date, key,
