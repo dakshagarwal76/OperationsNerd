@@ -235,6 +235,7 @@ backup) clears it.
 | POST | `/hr/leave/accruals`, `/hr/leave/adjustments` | |
 | GET, POST | `/hr/leave/requests` | list (`?employee_id=`, `?status=`), request (`half_day`, `half`) |
 | GET | `/hr/leave/requests/{id}` | |
+| GET | `/hr/leave/out` | who is away: `?start_date=&end_date=` (both required, inclusive), approved only, `&include_pending=true` adds pending; read only |
 | POST | `/hr/leave/requests/{id}/approve`, `/reject` (reason required), `/cancel` | the body is optional |
 | GET | `/hr/schema` | schema version |
 
@@ -308,6 +309,7 @@ python -B modules/hr/tests/mutation_check.py   # ~1 min, not run by CI
 |---|---|---|
 | `test_employees.py` | 17 | hiring, required/invalid fields, no sensitive fields, unique number/email, managers and loops, update diffs, termination and report reassignment, idempotent replay/conflict/failed key, 8 concurrent hires, raw SQL against every employee/event rule |
 | `test_leave.py` | 23 | leave types and allowance policy, accrual + proration, adjustments, working days and half days, approve/reject/cancel with credit-back, balance enforcement with pending holds, untracked types, overlaps across types, racing requests, termination effects, idempotency, ledger immutability, raw SQL against every leave rule, impossible days (2026-02-30) refused in every leave date column, deletes on a connection with foreign keys off, amounts/ids too big for SQLite, termination's derived keys never colliding |
+| `test_leave_out.py` | 12 | the who-is-away query: approved only by default, pending on request, rejected and cancelled never, ranges that only touch a request, inclusive edges, ordering, half days, bad ranges and flags refused, read only, and the API |
 | `test_migrations.py` | 12 | fresh, rerun, stepwise upgrade with backup holding the old data, failing migration rolls back (keeping earlier versions of the same run), numbering rules, newer database refused, sharing a database with another module's tables, concurrent migrators taking one backup, upgrading a v2 database to 3 keeps every row and rule, every date CHECK refuses impossible days on any SQLite version, in-memory |
 | `test_hardening.py` | 19 | the cancel clock, termination with spanning leave (charged to the end date) and nothing written after it, rehire (same record, rules, old-employment leave), trimmed/normalised identity fields, length limits on every text input, event dates in order, huge or odd ids, am/pm halves, the startup schema check; raw SQL against each new rule |
 | `test_api.py` | 14 | every endpoint, no sensitive fields in request bodies, 409/422/404/503 mapping, Idempotency-Key required and replayed, `main.py` mounts `/hr` only when enabled, too-big numbers, strict JSON types (no `"2"`→2 or `true`→1 coercion), empty decision bodies, a vanished database is a 503 and recovers, a tampered schema is a 503, rehire and half endpoints, length limits on bodies, header, query and path |

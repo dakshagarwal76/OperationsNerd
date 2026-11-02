@@ -763,6 +763,38 @@ def leave_requests(conn, employee_id: int | None = None, status: str | None = No
     return [_request_dict(r) for r in conn.execute(sql + " ORDER BY r.start_date, r.id", args)]
 
 
+def leave_out(conn, start_date: str, end_date: str, include_pending: bool = False) -> list[dict]:
+    """Who is away: leave requests that touch start_date..end_date (both inclusive), with the person.
+
+    Approved requests only, unless include_pending is true, which adds pending ones (each row carries its
+    status so a caller can tell them apart). A request counts if any part of it falls in the range, so a
+    request that starts before the range or ends after it is included whole. It is a read only query: the
+    employee's current name and department come from their current record, and rejected or cancelled
+    requests never show. Ordered by start date, then employee, then request id.
+    """
+    _check_date_range(start_date, end_date)
+    _bool("include_pending", include_pending)
+    statuses = ("approved", "pending") if include_pending else ("approved",)
+    marks = ", ".join("?" for _ in statuses)
+    rows = conn.execute(f"""SELECT {_REQUEST_COLUMNS},
+                                   TRIM(e.first_name || ' ' || COALESCE(e.last_name, '')) AS employee_name,
+                                   e.department AS department
+                            FROM hr_leave_requests r
+                            JOIN hr_leave_types t ON t.id = r.leave_type_id
+                            JOIN hr_employees e ON e.id = r.employee_id
+                            WHERE r.status IN ({marks}) AND r.start_date <= ? AND r.end_date >= ?
+                            ORDER BY r.start_date, r.employee_id, r.id""",
+                        (*statuses, end_date, start_date)).fetchall()
+    return [_request_dict(r) for r in rows]
+
+
+def _check_date_range(start_date, end_date):
+    _date("start_date", start_date)
+    _date("end_date", end_date)
+    if end_date < start_date:
+        raise ValueError(f"end_date {end_date} is before start_date {start_date}")
+
+
 def leave_ledger(conn, employee_id: int, code: str | None = None) -> list[dict]:
     """The employee's leave ledger, oldest first, with each entry's days."""
     _employee_row(conn, employee_id)
