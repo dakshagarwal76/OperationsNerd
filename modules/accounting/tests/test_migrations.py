@@ -56,13 +56,13 @@ def test_a_new_database_gets_every_version_and_no_backup():
     out = a.init_db(conn)
     assert out == {"module": "accounting", "from_version": 0, "to_version": LATEST,
                    "applied": list(range(1, LATEST + 1)), "backup": None}
-    assert a.schema_version(conn) == LATEST == a.latest_version() == 4
+    assert a.schema_version(conn) == LATEST == a.latest_version() == 5
     assert {"acct_accounts", "acct_journal_entries", "acct_journal_lines", "acct_customers", "acct_suppliers",
             "acct_invoices", "acct_invoice_lines", "acct_invoice_payments", "acct_bills", "acct_bill_lines",
             "acct_bill_payments"} <= tables(conn)
     names = [tuple(r) for r in conn.execute("SELECT module, version, name FROM module_migrations ORDER BY version")]
     assert names == [("accounting", 1, "ledger"), ("accounting", 2, "sales_and_purchases"),
-                     ("accounting", 3, "document_entries"), ("accounting", 4, "fund_accounting")]
+                     ("accounting", 3, "document_entries"), ("accounting", 4, "fund_accounting"), ("accounting", 5, "fund_capital_accounts")]
     assert "acct_funds" in tables(conn)
     assert conn.execute("SELECT fund_id FROM acct_journal_lines LIMIT 0").fetchone() is None
     assert not [f for f in os.listdir(TMP.name) if f.startswith("new.db.") and f.endswith(".bak")]
@@ -84,7 +84,7 @@ def test_an_upgrade_backs_up_the_database_first_and_keeps_the_data():
         {"account_code": "1000", "debit_cents": 500_000}, {"account_code": "3000", "credit_cents": 500_000}])
     backups = Path(TMP.name) / "upgrade_backups"
     out = a.init_db(conn, backup_dir=str(backups))
-    assert out["from_version"] == 1 and out["applied"] == [2, 3, 4] and out["to_version"] == 4
+    assert out["from_version"] == 1 and out["applied"] == [2, 3, 4, 5] and out["to_version"] == 5
     assert out["backup"] and Path(out["backup"]).parent == backups and "accounting-v0001" in out["backup"]
     copy = sqlite3.connect(out["backup"])
     assert copy.execute("SELECT code FROM acct_accounts ORDER BY code").fetchall()[0] == ("1000",)

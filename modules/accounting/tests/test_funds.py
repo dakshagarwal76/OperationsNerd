@@ -87,6 +87,7 @@ def test_grant_receipt_release_and_overspend_block():
                                         restricted, unres, clearing)
     assert len(a.journal_entries(conn)) == n + 1
     assert released["source"] == "fund_release" and len(released["lines"]) == 4
+    assert a.fund(conn, forest, as_of=AS_OF)["available_cents"] == 180_000
 
 
 def test_bill_posts_to_restricted_fund():

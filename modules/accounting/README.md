@@ -472,3 +472,33 @@ entered twice, and reads all five reports back out of the journal.
    date) before this is in front of an accountant?
 7. **Multi-currency**, and whether the business's currency belongs in this
    module's settings or the app's.
+
+### Restricted-fund spendable balance correction (migration 0005)
+
+Spendable balance is net income plus net equity, less net expenses and net
+capital acquisition debits. Use `designate_capital_account(conn, key, account_id)`
+on an asset account **before its first posting** to classify capital explicitly.
+The designation is immutable. Cash accounts are not capital accounts. Account
+names and codes are never used to guess this distinction.
+
+A cash-to-equipment purchase reduces spendable balance once. A cash-to-cash or
+capital-to-capital transfer does not reduce it again. Depreciation debits expense
+and credits designated capital, so its net spendable effect is zero. A capital
+refund or journal reversal restores only the corresponding net amount. A bill
+for designated capital consumes capacity when received, not again when paid.
+These are spendable-capacity rules, not a change to the normal balance sheet.
+
+**Migration limit:** existing asset postings are not automatically classified.
+An operator must review existing asset histories and agree an opening spendable
+adjustment/mapping before relying on this guard for those balances. The helper
+refuses retroactive classification. HTTP chart setup uses
+`POST /accounting/accounts/{account_id}/designate-capital` with an Idempotency-Key. Unclassified
+asset purchases cannot be distinguished from cash transfers by this schema.
+
+Temporary releases debit restricted net assets and credit unrestricted net
+assets using per-fund balanced liability-clearing lines. Equity clearing is
+refused because its credit would cancel the restricted equity debit in capacity.
+Permanent funds always remain restricted by default. The release command refuses
+them instead of borrowing temporary-purpose rules. No application-level override
+or permanent-release exception is provided. A deliberate programmer change is
+separate from the normal release workflow.

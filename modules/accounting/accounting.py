@@ -512,14 +512,34 @@ def record_grant_receipt(conn, idempotency_key: str, fund_id: int, entry_date: s
     return _run(conn, idempotency_key, "record_grant_receipt", payload, work)
 
 
+def designate_capital_account(conn, idempotency_key: str, account_id: int) -> dict:
+    """Classify an unposted asset as capital for restricted-fund spendable checks.
+
+    Explicit chart setup, never inferred from account names or numbers. Existing
+    asset histories need reviewed mapping; they are not silently reclassified.
+    """
+    _positive_int("account_id", account_id)
+    def work():
+        account = _account_row(conn, account_id)
+        if account["account_type"] != "asset":
+            raise InvalidState("capital designation requires an asset account")
+        if conn.execute("SELECT 1 FROM acct_fund_capital_accounts WHERE account_id = ?", (account_id,)).fetchone():
+            raise InvalidState("account is already designated as capital; reuse the original idempotency key to replay")
+        if conn.execute("SELECT 1 FROM acct_journal_lines WHERE account_id = ? LIMIT 1", (account_id,)).fetchone():
+            raise InvalidState("capital designation must precede the account's first posting")
+        conn.execute("INSERT INTO acct_fund_capital_accounts(account_id) VALUES (?)", (account_id,))
+        return {"account_id": account_id, "capital": True}
+    return _run(conn, idempotency_key, "designate_capital_account", {"account_id": account_id}, work)
+
+
 def release_from_restriction(conn, idempotency_key: str, from_fund_id: int, amount_cents: int,
                              entry_date: str, memo: str, donor_restricted_account_id: int,
                              unrestricted_net_assets_account_id: int, clearing_account_id: int) -> dict:
     """Moves net assets from a restricted fund to unrestricted when the donor's purpose is met.
 
-    Posts one entry balanced per fund: the restricted fund credits donor-restricted net assets and
-    debits an interfund clearing account; the unrestricted fund credits that clearing account and
-    debits unrestricted net assets. Returns journal_entry().
+    Posts one entry balanced per fund: the restricted fund debits donor-restricted net assets and
+    credits an interfund clearing account; the unrestricted fund debits that clearing account and
+    credits unrestricted net assets. Returns journal_entry().
     """
     _positive_int("from_fund_id", from_fund_id)
     _cents("amount_cents", amount_cents)
@@ -533,6 +553,10 @@ def release_from_restriction(conn, idempotency_key: str, from_fund_id: int, amou
         from_fund = _fund_row(conn, from_fund_id)
         if from_fund["restriction_type"] == "unrestricted":
             raise InvalidState(f"fund {from_fund_id} is unrestricted; only a restricted fund can be released from")
+        if from_fund["restriction_type"] == "permanently_restricted":
+            # Permanent funds remain restricted by default. No application-level
+            # override is exposed; any deliberate programmer change is separate.
+            raise InvalidState("permanent funds must remain restricted")
         if not from_fund["is_active"]:
             raise InvalidState(f"fund {from_fund_id} is not active")
         to_fund = default_fund_id(conn)
@@ -545,13 +569,13 @@ def release_from_restriction(conn, idempotency_key: str, from_fund_id: int, amou
         clearing = _account_row(conn, clearing_account_id)
         if donor["account_type"] != "equity" or unrestricted["account_type"] != "equity":
             raise InvalidState("donor_restricted and unrestricted_net_assets must be equity accounts")
-        if clearing["account_type"] not in ("equity", "liability"):
-            raise InvalidState("clearing_account must be an equity or liability interfund account")
+        if clearing["account_type"] != "liability":
+            raise InvalidState("clearing_account must be a liability interfund account; equity would cancel the release")
         lines = [
-            {"account_id": donor_restricted_account_id, "credit_cents": amount_cents, "fund_id": from_fund_id},
-            {"account_id": clearing_account_id, "debit_cents": amount_cents, "fund_id": from_fund_id},
-            {"account_id": clearing_account_id, "credit_cents": amount_cents, "fund_id": to_fund},
-            {"account_id": unrestricted_net_assets_account_id, "debit_cents": amount_cents, "fund_id": to_fund},
+            {"account_id": donor_restricted_account_id, "debit_cents": amount_cents, "fund_id": from_fund_id},
+            {"account_id": clearing_account_id, "credit_cents": amount_cents, "fund_id": from_fund_id},
+            {"account_id": clearing_account_id, "debit_cents": amount_cents, "fund_id": to_fund},
+            {"account_id": unrestricted_net_assets_account_id, "credit_cents": amount_cents, "fund_id": to_fund},
         ]
         resolved = []
         for line in lines:
@@ -1729,7 +1753,7 @@ def _fund_dict(conn, row, as_of=None) -> dict:
 
 
 def _fund_available_balance(conn, fund_id, as_of) -> int:
-    """How much a restricted fund can still spend: grant income and equity credits less expenses already posted."""
+    """Grant income + net equity less net expenses and explicitly designated capital outflow."""
     fund_row = _fund_row(conn, fund_id)
     if fund_row["restriction_type"] == "unrestricted":
         return MAX_CENTS
@@ -1748,7 +1772,17 @@ def _fund_available_balance(conn, fund_id, as_of) -> int:
             expense += row["debits"] - row["credits"]
         elif row["account_type"] == "equity":
             equity_in += row["credits"] - row["debits"]
-    return income + equity_in - expense
+    capital = 0
+    if _capital_designations_enabled(conn):
+        capital = conn.execute("""SELECT COALESCE(SUM(l.debit_cents - l.credit_cents), 0)
+            FROM acct_journal_lines l JOIN acct_journal_entries e ON e.id=l.entry_id
+            JOIN acct_fund_capital_accounts c ON c.account_id=l.account_id
+            WHERE l.fund_id=? AND e.entry_date<=?""", (fund_id, as_of)).fetchone()[0]
+    return income + equity_in - expense - capital
+
+
+def _capital_designations_enabled(conn):
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='acct_fund_capital_accounts'").fetchone() is not None
 
 
 def _check_entry_funds_balanced(lines) -> None:
@@ -1766,24 +1800,22 @@ def _check_entry_funds_balanced(lines) -> None:
 
 
 def _check_restricted_fund_spending(conn, lines, entry_date) -> None:
-    """Refuses expense or asset debits that would spend more than a restricted fund holds."""
+    """Refuses net expense + designated capital outflow beyond restricted capacity."""
     default_fund = default_fund_id(conn)
-    pending = {}  # fund_id -> extra expense debits in this entry
-    account_types = {}
+    pending = {}  # net expense + designated capital outflow per fund
+    capital_ids = {r[0] for r in conn.execute("SELECT account_id FROM acct_fund_capital_accounts")} if _capital_designations_enabled(conn) else set()
     for line in lines:
         fid = line.get("fund_id", default_fund)
-        if not line.get("debit_cents"):
-            continue
-        if line["account_id"] not in account_types:
-            account_types[line["account_id"]] = _account_row(conn, line["account_id"])["account_type"]
-        if account_types[line["account_id"]] == "expense":
-            pending[fid] = pending.get(fid, 0) + line.get("debit_cents", 0)
+        kind = _account_row(conn, line["account_id"])["account_type"]
+        if kind == "expense" or line["account_id"] in capital_ids:
+            delta = line.get("debit_cents", 0) - line.get("credit_cents", 0)
+            pending[fid] = pending.get(fid, 0) + delta
     for fid, extra in pending.items():
         fund_row = _fund_row(conn, fid)
         if fund_row["restriction_type"] == "unrestricted":
             continue
         available = _fund_available_balance(conn, fid, entry_date)
-        if extra > available:
+        if extra > 0 and extra > available:
             raise InsufficientFundBalance(f"fund {fund_row['code']} has {available} cents available, "
                                           f"this entry spends {extra} cents")
 

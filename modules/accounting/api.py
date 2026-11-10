@@ -321,6 +321,11 @@ def account_balance(account_id: int, as_of: Optional[str] = Query(None, max_leng
 
 # ---------------------------------------------------------------- funds
 
+@router.post("/accounts/{account_id}/designate-capital")
+def designate_capital_account(account_id: int, key: str = Depends(_key), conn=Depends(get_conn)):
+    return _call(accounting.designate_capital_account, conn, key, account_id)
+
+
 @router.get("/funds")
 def list_funds(active_only: bool = False, as_of: Optional[str] = Query(None, max_length=10),
                conn=Depends(get_conn)):

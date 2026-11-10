@@ -90,7 +90,7 @@ def a_bill(s, key="bill", number="DR-1", cents=27_000, **extra):
 
 def test_account_endpoints():
     s = seeded("accounts")
-    assert s.get("/accounting/schema") == {"module": "accounting", "version": 4}
+    assert s.get("/accounting/schema") == {"module": "accounting", "version": 5}
     assert [x["code"] for x in s.get("/accounting/accounts")] == [c[0] for c in CHART]
     assert [x["code"] for x in s.get("/accounting/accounts?account_type=income")] == ["4000"]
     bank = s.get("/accounting/accounts/1")
@@ -443,7 +443,7 @@ def test_main_mounts_the_router_and_the_ui_only_when_enabled():
     for path in ("/accounting/accounts", "/accounting/journal", "/accounting/invoices/{invoice_id}/send",
                  "/accounting/bills/{bill_id}/payments", "/accounting/reports/trial-balance"):
         assert path in on["paths"], path
-    assert on["schema"] == {"module": "accounting", "version": 4} and on["ui"] == 200
+    assert on["schema"] == {"module": "accounting", "version": 5} and on["ui"] == 200
     off = _routes_of_main("0")
     assert off["paths"] == [] and off["ui"] == 404
 
@@ -461,6 +461,16 @@ def test_the_ui_page_never_builds_html_from_a_string():
     assert "Idempotency-Key" not in code
 
 
+def test_capital_designation_endpoint_is_reachable_and_idempotent():
+    c = client("capital_designation")
+    calls = Calls(c)
+    account = calls.write("POST", "/accounting/accounts", {"code": "1500", "name": "Equipment", "account_type": "asset"}, expect=201).json()
+    path = f"/accounting/accounts/{account['account_id']}/designate-capital"
+    first = calls.write("POST", path, None, key="capital", expect=200).json()
+    assert calls.write("POST", path, None, key="capital", expect=200).json() == first
+    assert first == {"account_id": account["account_id"], "capital": True}
+
+
 def test_the_api_covers_every_command_the_module_has():
     """A command nobody can reach over HTTP is a gap; this catches one that is added later and not wired up."""
     paths = {route.path for route in api.router.routes}
@@ -473,8 +483,10 @@ def test_the_api_covers_every_command_the_module_has():
                         "add_customer", "update_customer", "add_supplier", "update_supplier",
                         "create_invoice", "send_invoice", "record_invoice_payment", "void_invoice",
                         "create_bill", "receive_bill", "record_bill_payment", "void_bill",
-                        "add_fund", "update_fund", "record_grant_receipt", "release_from_restriction"}
-    for path in ("/accounting/accounts", "/accounting/accounts/{account_id}", "/accounting/funds",
+                        "add_fund", "update_fund", "record_grant_receipt", "release_from_restriction",
+                        "designate_capital_account"}
+    for path in ("/accounting/accounts", "/accounting/accounts/{account_id}",
+                 "/accounting/accounts/{account_id}/designate-capital", "/accounting/funds",
                  "/accounting/funds/{fund_id}", "/accounting/funds/grant-receipt",
                  "/accounting/funds/release-from-restriction", "/accounting/journal",
                  "/accounting/journal/{entry_id}/reverse", "/accounting/customers",
